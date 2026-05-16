@@ -1,0 +1,53 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+*.so
+
+# Virtual environments
+venv/
+.venv/
+env/
+.env
+
+# Sensitive / runtime data
+config.json
+processed.json
+skip_counter.json
+areas.json
+selectors.json
+presets.json
+
+# Logs
+*.log
+
+# Screenshots / media
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.svg
+*.webp
+*.mp4
+*.mov
+
+# Archives
+*.zip
+*.tar
+*.gz
+*.rar
+
+# IDE
+.vscode/
+.idea/
+*.code-workspace
+
+# OS
+.DS_Store
+Thumbs.db
