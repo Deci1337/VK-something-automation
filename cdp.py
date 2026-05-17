@@ -1161,42 +1161,17 @@ class CDPClient:
         return attached
 
     def scroll_page(self, dy: int = 600) -> None:
-        """Прокручивает контейнер со списком участников вниз."""
-        js = f"""
-        (function(dy){{
-            // 1. Ищем контейнер через строку участника
-            let scrolled = false;
-            const link = document.querySelector('[data-testid="settings-subscriber-link"]');
-            if (link) {{
-                let el = link.parentElement;
-                while (el && el !== document.body) {{
-                    const s = getComputedStyle(el);
-                    const ov = s.overflowY;
-                    if ((ov === 'auto' || ov === 'scroll') && el.scrollHeight > el.clientHeight + 50) {{
-                        const before = el.scrollTop;
-                        el.scrollTop += dy;
-                        if (el.scrollTop !== before) {{ scrolled = true; break; }}
-                    }}
-                    el = el.parentElement;
-                }}
-            }}
-            // 2. Fallback: самый высокий скроллируемый контейнер
-            if (!scrolled) {{
-                const candidates = Array.from(document.querySelectorAll('*')).filter(el => {{
-                    const s = getComputedStyle(el);
-                    const ov = s.overflowY;
-                    return (ov === 'auto' || ov === 'scroll') &&
-                           el.scrollHeight > el.clientHeight + 100 && el.clientHeight > 200;
-                }});
-                if (candidates.length > 0) {{
-                    candidates.sort((a,b) => b.scrollHeight - a.scrollHeight);
-                    candidates[0].scrollTop += dy;
-                    scrolled = true;
-                }}
-            }}
-            // 3. Последний резерв — window
-            if (!scrolled) window.scrollBy(0, dy);
-            return scrolled;
-        }})({int(dy)})
-        """
-        self.evaluate(js)
+        """Прокручивает список участников вниз через CDP mouseWheel."""
+        # Координата центра viewport — туда направляем колесо мыши
+        vx = self.evaluate("window.innerWidth / 2") or 600
+        vy = self.evaluate("window.innerHeight / 2") or 400
+        # Одно событие mouseWheel на весь dy (Chrome суммирует delta)
+        self._call("Input.dispatchMouseEvent", {
+            "type": "mouseWheel",
+            "x": float(vx),
+            "y": float(vy),
+            "deltaX": 0,
+            "deltaY": float(dy),
+            "modifiers": 0,
+            "pointerType": "mouse",
+        })
