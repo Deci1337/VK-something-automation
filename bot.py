@@ -318,7 +318,7 @@ class VKBot:
             MAX_EMPTY        = 10
             consecutive_skip = 0
             MAX_SKIP         = 5   # сколько подряд «уже в базе» до прокрутки
-            BATCH_PAUSE_EVERY = 30  # перезагрузка + пауза каждые N успешных операций
+            BATCH_PAUSE_EVERY = random.randint(25, 35)  # перезагрузка + пауза каждые N успешных операций
 
             while (unlimited or done < self.count) and not self._stopped():
 
@@ -442,10 +442,9 @@ class VKBot:
                     if self._stopped():
                         break
                     self._log("  ▶ Продолжаю — прокручиваю до необработанных участников...")
-                    # После перезагрузки страница начинается с начала — скроллим быстро
-                    # MAX_EMPTY временно увеличиваем чтобы не остановиться раньше времени
                     empty_scrolls = 0
                     MAX_EMPTY = max(MAX_EMPTY, 60)
+                    BATCH_PAUSE_EVERY = random.randint(25, 35)
 
             self._log(f"\n🏁 Завершено. Обработано: {done}")
 
