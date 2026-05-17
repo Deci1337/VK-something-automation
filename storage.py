@@ -57,6 +57,51 @@ def clear_all() -> None:
     _flush()
 
 
+# ─── Список игнорируемых ID ───────────────────────────────────────────────────
+
+IGNORE_PATH = os.path.join(os.path.dirname(__file__), "ignore.json")
+_ignore_cache: Optional[set] = None
+
+
+def _load_ignore() -> set:
+    global _ignore_cache
+    if _ignore_cache is None:
+        if os.path.exists(IGNORE_PATH):
+            try:
+                with open(IGNORE_PATH, "r", encoding="utf-8") as f:
+                    _ignore_cache = set(json.load(f).get("ignore", []))
+            except Exception:
+                _ignore_cache = set()
+        else:
+            _ignore_cache = set()
+    return _ignore_cache
+
+
+def _flush_ignore() -> None:
+    with open(IGNORE_PATH, "w", encoding="utf-8") as f:
+        json.dump({"ignore": sorted(_ignore_cache)}, f, ensure_ascii=False, indent=2)
+
+
+def is_ignored(account_id: str) -> bool:
+    return str(account_id) in _load_ignore()
+
+
+def add_ignore(account_id: str) -> None:
+    ids = _load_ignore()
+    ids.add(str(account_id).strip())
+    _flush_ignore()
+
+
+def remove_ignore(account_id: str) -> None:
+    ids = _load_ignore()
+    ids.discard(str(account_id))
+    _flush_ignore()
+
+
+def get_all_ignored() -> list:
+    return sorted(_load_ignore())
+
+
 # ─── Счётчик пропуска (legacy, оставлен для совместимости) ───────────────────
 
 COUNTER_PATH = os.path.join(os.path.dirname(__file__), "skip_counter.json")

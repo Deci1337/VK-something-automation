@@ -339,7 +339,7 @@ class VKBot:
                 target = None
                 skipped_in_view = 0
                 for m in members:
-                    if storage.is_processed(m["id"]):
+                    if storage.is_processed(m["id"]) or storage.is_ignored(m["id"]):
                         skipped_in_view += 1
                         continue
                     target = m

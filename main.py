@@ -121,6 +121,7 @@ class App(ctk.CTk):
             ("▶  Запуск",    self._page_run),
             ("⚙  Настройки", self._page_settings),
             ("📋  История",   self._page_history),
+            ("🚫  Игнор",     self._page_ignore),
         ]
 
         ctk.CTkFrame(sidebar, fg_color="transparent", height=10).pack()
@@ -307,6 +308,72 @@ class App(ctk.CTk):
                                     state="disabled")
         self._hist.pack(fill="both", expand=True, padx=12, pady=10)
         self._refresh_history()
+
+    # ── Страница «Игнор» ─────────────────────────────────────────────────────
+
+    def _page_ignore(self, pg):
+        top = card(pg)
+        top.pack(fill="x", pady=(0, 10))
+
+        lbl(top, "Добавить ID для игнорирования", FH2).pack(anchor="w", padx=18, pady=(16, 4))
+        ctk.CTkFrame(top, fg_color=C["border"], height=1).pack(fill="x", padx=18, pady=(0, 6))
+        lbl(top, "Введите ID через запятую или по одному на строку (например: id123456, 789012)",
+            FSM, C["muted"]).pack(anchor="w", padx=18, pady=(0, 4))
+
+        self._ignore_inp = ctk.CTkTextbox(top, font=FMONO, height=80,
+                                          fg_color=C["panel"], text_color=C["text"],
+                                          corner_radius=8)
+        self._ignore_inp.pack(fill="x", padx=18, pady=(0, 8))
+
+        br = ctk.CTkFrame(top, fg_color="transparent")
+        br.pack(anchor="w", padx=18, pady=(0, 14))
+        btn_primary(br, "Добавить", self._ignore_add, height=36).pack(side="left")
+        btn_ghost(br, "Очистить список", self._ignore_clear, height=36).pack(side="left", padx=(8, 0))
+
+        bottom = card(pg)
+        bottom.pack(fill="both", expand=True)
+
+        hr = ctk.CTkFrame(bottom, fg_color="transparent")
+        hr.pack(fill="x", padx=16, pady=(12, 8))
+        lbl(hr, "Игнорируемые аккаунты", FH2).pack(side="left")
+        btn_ghost(hr, "Обновить", self._ignore_refresh).pack(side="right")
+
+        ctk.CTkFrame(bottom, fg_color=C["border"], height=1).pack(fill="x", padx=16)
+        self._ignore_list = ctk.CTkTextbox(bottom, font=FMONO, fg_color=C["panel"],
+                                           text_color=C["text"], corner_radius=8,
+                                           state="disabled")
+        self._ignore_list.pack(fill="both", expand=True, padx=12, pady=10)
+        self._ignore_refresh()
+
+    def _ignore_add(self):
+        raw = self._ignore_inp.get("1.0", "end").strip()
+        if not raw:
+            return
+        ids = [x.strip() for x in raw.replace("\n", ",").split(",") if x.strip()]
+        for uid in ids:
+            uid = uid.lstrip("@")
+            storage.add_ignore(uid)
+        self._ignore_inp.delete("1.0", "end")
+        self._ignore_refresh()
+        self._append_log(f"🚫 Добавлено в игнор: {len(ids)} ID")
+
+    def _ignore_clear(self):
+        for uid in storage.get_all_ignored():
+            storage.remove_ignore(uid)
+        self._ignore_refresh()
+        self._append_log("🗑 Список игнора очищен")
+
+    def _ignore_refresh(self):
+        data = storage.get_all_ignored()
+        self._ignore_list.configure(state="normal")
+        self._ignore_list.delete("1.0", "end")
+        if not data:
+            self._ignore_list.insert("end", "Список пуст\n")
+        else:
+            self._ignore_list.insert("end", f"Всего: {len(data)}\n\n")
+            for uid in data:
+                self._ignore_list.insert("end", f"{uid}\n")
+        self._ignore_list.configure(state="disabled")
 
     # ── Логика ───────────────────────────────────────────────────────────────
 
