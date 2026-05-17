@@ -318,6 +318,7 @@ class VKBot:
             MAX_EMPTY        = 10
             consecutive_skip = 0
             MAX_SKIP         = 5   # сколько подряд «уже в базе» до прокрутки
+            BATCH_PAUSE_EVERY = 30  # перезагрузка + пауза каждые N успешных операций
 
             while (unlimited or done < self.count) and not self._stopped():
 
@@ -423,6 +424,28 @@ class VKBot:
                 _human_pause(2.0, 4.0, self._stop_event)
                 # 9. Основная пауза перед следующим
                 _human_pause(self.delay_min, self.delay_max, self._stop_event)
+
+                # 10. Каждые BATCH_PAUSE_EVERY операций — перезагрузка + 2 мин пауза
+                if done % BATCH_PAUSE_EVERY == 0:
+                    self._log(
+                        f"\n⏸ Пауза после {done} операций — перезагружаю страницу и жду 2 мин..."
+                    )
+                    try:
+                        client.evaluate(f"window.location.href = '{self.group_url}/settings/subscribers'")
+                    except Exception:
+                        pass
+                    # 2 минуты ожидания с проверкой остановки
+                    for _ in range(120):
+                        if self._stopped():
+                            break
+                        time.sleep(1)
+                    if self._stopped():
+                        break
+                    self._log("  ▶ Продолжаю — прокручиваю до необработанных участников...")
+                    # После перезагрузки страница начинается с начала — скроллим быстро
+                    # MAX_EMPTY временно увеличиваем чтобы не остановиться раньше времени
+                    empty_scrolls = 0
+                    MAX_EMPTY = max(MAX_EMPTY, 60)
 
             self._log(f"\n🏁 Завершено. Обработано: {done}")
 
