@@ -973,6 +973,18 @@ class VKBot:
           3. Ждём появление probe_text в DOM.
           4. Сразу переводим CDP mouseMoved на rect пункта (удерживает меню открытым).
         """
+        # Закрыть любые открытые попапы перед началом
+        try:
+            client.evaluate("document.activeElement?.blur()")
+        except Exception:
+            pass
+        if pyautogui:
+            try: pyautogui.press("escape")
+            except Exception: pass
+        try: client.evaluate("document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',keyCode:27,bubbles:true}))")
+        except Exception: pass
+        time.sleep(0.3)
+
         for attempt in range(1, attempts + 1):
             if self._stopped():
                 return None
