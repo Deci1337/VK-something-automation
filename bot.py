@@ -160,28 +160,15 @@ class VKBot:
 
     # ── Конвертация viewport CSS → физические OS-пиксели (с DPR) ─────────────
 
-    def _scroll_list(self, client: cdp.CDPClient, clicks: int = 8) -> None:
-        """Скроллит список участников вниз через pyautogui (реальное колесо мыши).
+    def _scroll_list(self, client: cdp.CDPClient, dy: int = 600) -> None:
+        """Скроллит список участников вниз.
 
-        pyautogui.scroll() — единственный надёжный способ: VK реагирует только
-        на настоящие OS-события, игнорируя JS scrollTop и CDP mouseWheel.
+        Стратегия:
+        1. JS scrollTop по контейнеру со строкой участника (быстро, тихо).
+        2. CDP mouseWheel как fallback.
         """
         try:
-            origin = client.get_content_origin()
-            dpr = float(origin.get("dpr", 1) or 1)
-            vx = client.evaluate("window.innerWidth / 2") or 600
-            vy = client.evaluate("window.innerHeight / 2") or 400
-            sx = int((origin["x"] + vx) * dpr)
-            sy = int((origin["y"] + vy) * dpr)
-            if pyautogui:
-                pyautogui.moveTo(sx, sy, duration=0.1, _pause=False)
-                pyautogui.scroll(-clicks, _pause=False)
-                return
-        except Exception:
-            pass
-        # Fallback: CDP mouseWheel
-        try:
-            client.scroll_page(clicks * 80)
+            client.scroll_page(dy)
         except Exception:
             pass
 
@@ -353,7 +340,7 @@ class VKBot:
                         self._log("🏁 DOM пуст — возможно конец списка. Выход.")
                         break
                     self._log(f"  ⬇ DOM пуст, прокручиваю ({empty_scrolls}/{MAX_EMPTY})...")
-                    self._scroll_list(client, clicks=10)
+                    self._scroll_list(client, dy=800)
                     _human_pause(2.5, 4.0, self._stop_event)
                     continue
 
@@ -377,7 +364,7 @@ class VKBot:
                         f"  ⬇ Все {skipped_in_view} видимых уже в базе, прокручиваю"
                         f" ({empty_scrolls}/{MAX_EMPTY})..."
                     )
-                    self._scroll_list(client, clicks=8)
+                    self._scroll_list(client, dy=600)
                     _human_pause(2.0, 3.5, self._stop_event)
                     continue
 
@@ -404,7 +391,7 @@ class VKBot:
                         except Exception: pass
                     _human_pause(2.0, 3.5, self._stop_event)
                     # Прокручиваем дальше — этого участника пробовать смысла нет
-                    self._scroll_list(client, clicks=5)
+                    self._scroll_list(client, dy=400)
                     # Защита от бесконечного цикла на одном участнике
                     storage.mark_processed(uid, self.group_url)
                     continue
