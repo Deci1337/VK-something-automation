@@ -137,15 +137,25 @@ class VKBot:
     def _stopped(self) -> bool:
         return self._stop_event.is_set()
 
-    def _wait_idle(self, total: float) -> None:
-        start      = time.time()
+    def _wait_idle(self, total: float, captcha_client: Optional['cdp.CDPClient'] = None) -> None:
+        start       = time.time()
         next_jiggle = time.time() + random.uniform(2.0, 4.5)
+        next_captcha_check = time.time() + 1.5
         while time.time() - start < total:
             if self._stopped():
                 return
             if time.time() >= next_jiggle:
                 _idle_jiggle()
                 next_jiggle = time.time() + random.uniform(2.5, 6.0)
+            # Каждые ~1.5 сек проверяем капчу, чтобы не ждать впустую
+            if captcha_client is not None and time.time() >= next_captcha_check:
+                try:
+                    if self._detect_and_solve_captcha(captcha_client):
+                        # Капча была — выходим из ожидания пораньше
+                        return
+                except Exception:
+                    pass
+                next_captcha_check = time.time() + 1.5
             time.sleep(0.2)
 
     # ── Конвертация viewport CSS → физические OS-пиксели (с DPR) ─────────────
@@ -271,6 +281,12 @@ class VKBot:
                     f"  📐 Chrome viewport origin: ({origin.get('x')},{origin.get('y')})"
                     f"  DPR={origin.get('dpr')}"
                 )
+                # Включаем auto-attach для OOPIF (cross-origin iframe'ов VK ID капчи)
+                try:
+                    client.enable_iframe_discovery()
+                    self._log("  ✅ iframe-discovery включен (OOPIF будут прикрепляться)")
+                except Exception as e:
+                    self._log(f"  ⚠ iframe-discovery: {e}")
                 if self.on_cdp_ready:
                     self.on_cdp_ready(client)
             except cdp.CDPError as e:
@@ -292,6 +308,11 @@ class VKBot:
             MAX_SKIP         = 5   # сколько подряд «уже в базе» до прокрутки
 
             while (unlimited or done < self.count) and not self._stopped():
+
+                # 0. Проверяем капчу перед каждой итерацией
+                self._handle_captcha(client)
+                if self._stopped():
+                    break
 
                 # 1. Получаем видимых участников из DOM
                 try:
@@ -376,10 +397,10 @@ class VKBot:
                     storage.mark_processed(uid, self.group_url)
                     break
 
-                # 5. Ждём
+                # 5. Ждём (с фоновой проверкой капчи каждые 1.5 сек)
                 hold = random.uniform(self.admin_hold, self.admin_hold + 5)
-                self._log(f"  ⏱ Держим {hold:.0f} сек...")
-                self._wait_idle(hold)
+                self._log(f"  ⏱ Держим {hold:.0f} сек (с мониторингом капчи)...")
+                self._wait_idle(hold, captcha_client=client)
 
                 if self._stopped():
                     storage.mark_processed(uid, self.group_url)
@@ -409,6 +430,485 @@ class VKBot:
             client.close()
             if self.on_done:
                 self.on_done()
+
+    # ── Обработка капчи ───────────────────────────────────────────────────────
+
+    def _click_captcha_rect(self, c: cdp.CDPClient, rect: dict,
+                              iframe_offset: Optional[dict],
+                              main_client: cdp.CDPClient, label: str) -> None:
+        """Кликает по чекбоксу.
+
+        rect — viewport-rect внутри контекста c (главная страница или iframe).
+        iframe_offset — если c это iframe, передаём rect самого iframe в родителе
+        (viewport родителя). Тогда курсор будет двигаться в правильную точку OS,
+        а CDP-клик уйдёт в iframe-контекст.
+        """
+        # Точка клика в системе координат контекста c
+        local_vx = rect["x"] + rect["w"] * random.uniform(0.4, 0.6)
+        local_vy = rect["y"] + rect["h"] * random.uniform(0.4, 0.6)
+
+        # Для OS-движения курсора нужны экранные координаты.
+        # Если это iframe — добавляем offset iframe в родителе, и используем DPR родителя.
+        if iframe_offset is not None:
+            origin = main_client.get_content_origin()
+            dpr = float(origin.get("dpr", 1) or 1)
+            screen_vx = iframe_offset["x"] + local_vx
+            screen_vy = iframe_offset["y"] + local_vy
+            sx = int((origin["x"] + screen_vx) * dpr)
+            sy = int((origin["y"] + screen_vy) * dpr)
+        else:
+            origin = c.get_content_origin()
+            dpr = float(origin.get("dpr", 1) or 1)
+            sx = int((origin["x"] + local_vx) * dpr)
+            sy = int((origin["y"] + local_vy) * dpr)
+
+        self._log(f"  → OS-курсор Безье → screen=({sx},{sy})  iframe_offset={iframe_offset is not None}")
+
+        # 1) Движение курсора по кривой Безье в OS — визуально человеческое
+        _bezier_move(sx, sy, duration=random.uniform(0.35, 0.6))
+        time.sleep(random.uniform(0.25, 0.45))
+
+        # 2) Клик: для iframe-контекста CDP click_at_viewport идёт в правильный context
+        if pyautogui:
+            try:
+                pyautogui.click(sx, sy, _pause=False)
+            except Exception as e:
+                self._log(f"  ⚠ pyautogui click error: {e}")
+
+        # 3) Дополнительно CDP-клик в координатах ВНУТРИ контекста c
+        try:
+            c.click_at_viewport(local_vx, local_vy)
+        except Exception:
+            pass
+
+    def _try_click_captcha_in_client(self, c: cdp.CDPClient, label: str,
+                                       iframe_offset: Optional[dict] = None,
+                                       main_client: Optional[cdp.CDPClient] = None) -> bool:
+        rect = c.find_captcha_checkbox()
+        if not rect:
+            return False
+        src = rect.get("src", "?")
+        self._log(f"🤖 КАПЧА: нашёл чекбокс [{label}] src={src} @ "
+                  f"({int(rect['x'])},{int(rect['y'])}) {int(rect['w'])}x{int(rect['h'])}")
+
+        self._click_captcha_rect(c, rect, iframe_offset, main_client or c, label)
+        _human_pause(1.2, 2.0, self._stop_event)
+
+        # Повторный клик если чекбокс ещё там
+        rect2 = c.find_captcha_checkbox()
+        if rect2:
+            self._log("  → чекбокс ещё виден, повторный клик")
+            self._click_captcha_rect(c, rect2, iframe_offset, main_client or c, label)
+            _human_pause(1.0, 1.6, self._stop_event)
+
+        # JS-клик fallback
+        rect3 = c.find_captcha_checkbox()
+        if rect3:
+            self._log("  → чекбокс ещё виден, JS-клик")
+            try:
+                c.js_click_text("Я не робот", popup_only=False)
+            except Exception:
+                pass
+            _human_pause(1.0, 1.6, self._stop_event)
+        return True
+
+    def _iter_popup_clients(self, main_client: cdp.CDPClient):
+        """Перебирает все CDP-таргеты (page + iframe), исключая основной таб."""
+        import websocket as _ws
+
+        seen = set()
+        # 1) Через CDP Target.getTargets — даёт OOPIF iframe'ы
+        targets = []
+        try:
+            targets = main_client.get_all_targets_cdp() or []
+        except Exception:
+            targets = []
+        for t in targets:
+            tid = t.get("targetId")
+            url = t.get("url", "")
+            ttype = t.get("type")
+            if not tid or tid in seen:
+                continue
+            if ttype not in ("page", "iframe", "webview"):
+                continue
+            if url == main_client.target_url:
+                continue
+            if url.startswith("chrome://") or url.startswith("devtools://"):
+                continue
+            seen.add(tid)
+            ws_url = main_client.iframe_ws_url(tid)
+            popup = cdp.CDPClient(port=main_client.port)
+            try:
+                popup.ws = _ws.create_connection(
+                    ws_url, timeout=8, origin="http://localhost:9222"
+                )
+                popup.target_url = url
+            except Exception:
+                continue
+            try:
+                yield popup, url, ttype
+            finally:
+                popup.close()
+
+        # 2) Fallback через /json HTTP
+        try:
+            import requests as _rq
+            tabs = _rq.get(f"http://localhost:{main_client.port}/json", timeout=3).json()
+        except Exception:
+            return
+        for t in tabs:
+            tid = t.get("id")
+            ttype = t.get("type")
+            if tid in seen or ttype not in ("page", "iframe"):
+                continue
+            url = t.get("url", "")
+            ws_url = t.get("webSocketDebuggerUrl")
+            if not ws_url or url == main_client.target_url:
+                continue
+            if url.startswith("chrome://") or url.startswith("devtools://"):
+                continue
+            seen.add(tid)
+            popup = cdp.CDPClient(port=main_client.port)
+            try:
+                popup.ws = _ws.create_connection(
+                    ws_url, timeout=8, origin="http://localhost:9222"
+                )
+                popup.target_url = url
+            except Exception:
+                continue
+            try:
+                yield popup, url, ttype
+            finally:
+                popup.close()
+
+    # JS для поиска чекбокса 'Я не робот' в любом DOM-контексте (включая iframe-сессию)
+    _CAPTCHA_FIND_JS = r"""
+    (function() {
+        function norm(s) { return (s || '').replace(/[\s ]+/g, ' ').trim().toLowerCase(); }
+        function ok(r) {
+            return r.width > 0 && r.height > 0
+                && r.right > 0 && r.bottom > 0
+                && r.left < (window.innerWidth + 100)
+                && r.top  < (window.innerHeight + 100);
+        }
+        function ancestor(el) {
+            let cur = el;
+            for (let i = 0; cur && i < 10; i++) {
+                const cls = (typeof cur.className === 'string') ? cur.className : '';
+                if (/Checkbox(?!.*title)/i.test(cls) && !/title/i.test(cls)) return cur;
+                if (cur.tagName === 'LABEL') return cur;
+                if (cur.getAttribute && cur.getAttribute('role') === 'checkbox') return cur;
+                cur = cur.parentElement;
+            }
+            return null;
+        }
+        const found = [];
+        try {
+            for (const el of document.querySelectorAll(
+                '[class*="Checkbox__title"], [class*="Checkbox-module__title"]'
+            )) {
+                const t = norm(el.textContent);
+                if (!t.includes('не робот') && !t.includes('robot')) continue;
+                const c = ancestor(el) || el.parentElement || el;
+                const r = c.getBoundingClientRect();
+                if (ok(r)) found.push({rect: r, src: 'vkc-title', txt: t});
+            }
+        } catch (e) {}
+        try {
+            for (const cb of document.querySelectorAll('input[type="checkbox"]')) {
+                const wrap = cb.closest('label')
+                    || cb.closest('[class*="Checkbox"]')
+                    || cb.parentElement;
+                if (!wrap) continue;
+                const t = norm(wrap.textContent);
+                if (!t.includes('не робот') && !t.includes('robot')) continue;
+                const r = wrap.getBoundingClientRect();
+                if (ok(r)) found.push({rect: r, src: 'input', txt: t});
+            }
+        } catch (e) {}
+        try {
+            for (const el of document.querySelectorAll('div, span, p, label, button')) {
+                if (el.children.length > 2) continue;
+                const t = norm(el.textContent);
+                if (t !== 'я не робот' && t !== "i'm not a robot"
+                    && t !== 'i am not a robot') continue;
+                const c = ancestor(el) || el.parentElement || el;
+                const r = c.getBoundingClientRect();
+                if (ok(r)) found.push({rect: r, src: 'text', txt: t});
+            }
+        } catch (e) {}
+        if (!found.length) return null;
+        const f = found[0];
+        return {x: f.rect.left, y: f.rect.top, w: f.rect.width, h: f.rect.height,
+                src: f.src, txt: f.txt};
+    })()
+    """
+
+    def _try_click_captcha_in_iframe_session(self, main_client: cdp.CDPClient,
+                                                session_id: str, url: str,
+                                                iframe_offset: Optional[dict]) -> bool:
+        """Найти и кликнуть чекбокс через iframe-сессию CDP."""
+        rect = main_client.evaluate_in_session(self._CAPTCHA_FIND_JS, session_id)
+        if not rect:
+            return False
+        short = url[:70].replace("https://", "").replace("http://", "")
+        self._log(f"🤖 КАПЧА: нашёл чекбокс в iframe-сессии [{short}] "
+                  f"src={rect.get('src')} @ ({int(rect['x'])},{int(rect['y'])}) "
+                  f"{int(rect['w'])}x{int(rect['h'])}")
+
+        # Если не знаем offset iframe в родителе — считаем что (0,0) (часто так и есть)
+        if iframe_offset is None:
+            iframe_offset = {"x": 0, "y": 0}
+
+        origin = main_client.get_content_origin()
+        dpr = float(origin.get("dpr", 1) or 1)
+
+        local_vx = rect["x"] + rect["w"] * random.uniform(0.4, 0.6)
+        local_vy = rect["y"] + rect["h"] * random.uniform(0.4, 0.6)
+        target_vx = iframe_offset["x"] + local_vx
+        target_vy = iframe_offset["y"] + local_vy
+        sx = int((origin["x"] + target_vx) * dpr)
+        sy = int((origin["y"] + target_vy) * dpr)
+
+        self._log(f"  → OS-курсор Безье → screen=({sx},{sy})")
+
+        # 1) Движение курсора по Безье + OS-клик (визуально + триггерит :hover)
+        _bezier_move(sx, sy, duration=random.uniform(0.4, 0.65))
+        time.sleep(random.uniform(0.25, 0.45))
+        if pyautogui:
+            try:
+                pyautogui.click(sx, sy, _pause=False)
+            except Exception as e:
+                self._log(f"  ⚠ pyautogui click error: {e}")
+
+        # 2) CDP-клик в координатах iframe — гарантированный trusted event внутри iframe
+        try:
+            main_client.click_in_session(local_vx, local_vy, session_id)
+        except Exception:
+            pass
+
+        _human_pause(1.2, 2.2, self._stop_event)
+
+        # Повторный клик если ещё виден
+        rect2 = main_client.evaluate_in_session(self._CAPTCHA_FIND_JS, session_id)
+        if rect2:
+            self._log("  → чекбокс ещё виден, повторный клик")
+            local_vx2 = rect2["x"] + rect2["w"] / 2
+            local_vy2 = rect2["y"] + rect2["h"] / 2
+            try:
+                main_client.click_in_session(local_vx2, local_vy2, session_id)
+            except Exception:
+                pass
+            target_vx2 = iframe_offset["x"] + local_vx2
+            target_vy2 = iframe_offset["y"] + local_vy2
+            sx2 = int((origin["x"] + target_vx2) * dpr)
+            sy2 = int((origin["y"] + target_vy2) * dpr)
+            _bezier_move(sx2, sy2, duration=0.4)
+            if pyautogui:
+                try: pyautogui.click(sx2, sy2, _pause=False)
+                except Exception: pass
+            _human_pause(1.0, 1.6, self._stop_event)
+        return True
+
+    def _detect_and_solve_captcha(self, main_client: cdp.CDPClient) -> bool:
+        """Один проход поиска капчи в main + iframe-сессиях + blind-click."""
+        # 1) Главный фрейм
+        if self._try_click_captcha_in_client(main_client, "main"):
+            return True
+
+        # 2) Включаем iframe-discovery (если ещё нет)
+        try:
+            main_client.enable_iframe_discovery()
+        except Exception:
+            pass
+
+        # 3) Координаты iframe в родителе
+        try:
+            iframe_offset = main_client.find_captcha_iframe_in_parent()
+        except Exception:
+            iframe_offset = None
+
+        # 4) Прикрепляем уже существующие OOPIF-таргеты вручную + перебираем сессии
+        try:
+            n = main_client.attach_existing_iframes()
+            if n:
+                self._log(f"  📎 attach_existing_iframes: прикреплено {n} новых таргетов")
+        except Exception:
+            pass
+        sessions_tried = 0
+        try:
+            sessions = main_client.get_iframe_sessions()
+        except Exception:
+            sessions = {}
+        for sid, info in sessions.items():
+            url = info.get("url", "")
+            if not url:
+                continue
+            score = 0
+            if "id.vk.com" in url: score += 10
+            if "captcha" in url: score += 10
+            if "vkid" in url: score += 5
+            if score == 0:
+                continue
+            sessions_tried += 1
+            if self._try_click_captcha_in_iframe_session(main_client, sid, url, iframe_offset):
+                return True
+
+        # 5) Старый путь — popup-таргеты (page-level)
+        for popup, url, ttype in self._iter_popup_clients(main_client):
+            short = (url or ttype)[:70].replace("https://", "").replace("http://", "")
+            offset = iframe_offset if ttype == "iframe" else None
+            if self._try_click_captcha_in_client(popup, short,
+                                                    iframe_offset=offset,
+                                                    main_client=main_client):
+                return True
+
+        # 6) ⚠ BLIND-CLICK fallback: если в родителе найден iframe VK ID капчи,
+        # но ни одна CDP-сессия не дала чекбокс — кликаем по расчётной позиции.
+        if iframe_offset:
+            src = iframe_offset.get("src", "")
+            if ("not_robot_captcha" in src or "id.vk.com" in src
+                    or "vkid" in src or "captcha" in src):
+                self._log(f"  ⚠ iframe есть, но через CDP-сессии не достучаться "
+                          f"(sessions_tried={sessions_tried}) — blind-click")
+                self._blind_click_captcha_iframe(main_client, iframe_offset)
+                return True
+
+        # 7) Ничего не нашли — диагностика (rate-limited)
+        self._log_captcha_diag(main_client, "no-captcha")
+        return False
+
+    def _log_captcha_diag(self, main_client: cdp.CDPClient, tag: str = "") -> None:
+        """Логирует диагностику капчи: iframe в DOM + iframe-сессии + targets.
+        Вызывается каждый раз когда капча подозревается но не найдена,
+        с rate limit ~1 раз в 3 сек чтобы не флудить логи.
+        """
+        now = time.time()
+        last = getattr(self, "_last_captcha_diag", 0)
+        if now - last < 3.0:
+            return
+        self._last_captcha_diag = now
+        prefix = f"[{tag}] " if tag else ""
+        try:
+            ifr = main_client.find_captcha_iframe_in_parent()
+            if ifr:
+                self._log(f"  {prefix}📦 iframe: src={ifr.get('src','')[:80]} "
+                          f"rect=({int(ifr['x'])},{int(ifr['y'])}) "
+                          f"{int(ifr['w'])}x{int(ifr['h'])}")
+            else:
+                self._log(f"  {prefix}📦 iframe-кандидата нет в DOM родителя")
+        except Exception as e:
+            self._log(f"  (iframe diag: {e})")
+        try:
+            sessions = main_client.get_iframe_sessions()
+            self._log(f"  {prefix}🧩 iframe-сессий: {len(sessions)}")
+            for sid, info in list(sessions.items())[:6]:
+                self._log(f"     sid={sid[:10]}... url={info.get('url','')[:90]}")
+        except Exception as e:
+            self._log(f"  (sessions diag: {e})")
+
+    def _blind_click_captcha_iframe(self, main_client: cdp.CDPClient,
+                                       iframe_offset: dict) -> bool:
+        """Fallback: клик по расчётной позиции чекбокса в iframe VK ID капчи.
+
+        Когда не удалось получить доступ к содержимому iframe через CDP-сессию,
+        используем фиксированную геометрию: диалог ~380x430 центрирован в iframe,
+        чекбокс находится примерно на 38% по X и 71% по Y от верха диалога.
+        """
+        DIALOG_W = 380.0
+        DIALOG_H = 430.0
+        CB_REL_X = 0.38   # 38% от левого края диалога
+        CB_REL_Y = 0.71   # 71% от верха диалога
+
+        iframe_cx = iframe_offset["x"] + iframe_offset["w"] / 2
+        iframe_cy = iframe_offset["y"] + iframe_offset["h"] / 2
+        dialog_left = iframe_cx - DIALOG_W / 2
+        dialog_top  = iframe_cy - DIALOG_H / 2
+        cb_vx = dialog_left + DIALOG_W * CB_REL_X
+        cb_vy = dialog_top  + DIALOG_H * CB_REL_Y
+
+        origin = main_client.get_content_origin()
+        dpr = float(origin.get("dpr", 1) or 1)
+        sx = int((origin["x"] + cb_vx) * dpr)
+        sy = int((origin["y"] + cb_vy) * dpr)
+
+        self._log(f"  🎯 BLIND-CLICK по расчётной позиции чекбокса: "
+                  f"viewport=({int(cb_vx)},{int(cb_vy)}) screen=({sx},{sy})")
+
+        # Движение Безье + OS-клик
+        _bezier_move(sx, sy, duration=random.uniform(0.4, 0.65))
+        time.sleep(random.uniform(0.3, 0.5))
+        if pyautogui:
+            try:
+                pyautogui.click(sx, sy, _pause=False)
+            except Exception as e:
+                self._log(f"  ⚠ pyautogui click error: {e}")
+
+        # Дублирующий CDP-клик через родителя — событие уйдёт в iframe
+        try:
+            main_client.click_at_viewport(cb_vx, cb_vy)
+        except Exception:
+            pass
+
+        _human_pause(1.2, 2.0, self._stop_event)
+        return True
+
+    def _handle_captcha(self, main_client: cdp.CDPClient, wait_seconds: float = 0.0) -> bool:
+        """Проверить наличие капчи VK и обработать её.
+
+        wait_seconds — сколько секунд ждать ПОЯВЛЕНИЯ капчи (с интервальным
+        опросом). Используется после действий, после которых VK может показать
+        капчу не мгновенно. 0 = только один быстрый чек.
+        Возвращает True если капча была обнаружена и решена.
+        """
+        # Первый быстрый проход
+        if self._detect_and_solve_captcha(main_client):
+            return True
+
+        # Если нет — логируем диагностику (rate-limited)
+        if wait_seconds > 0:
+            self._log_captcha_diag(main_client, "wait")
+
+        # Polling — ждём появления капчи
+        if wait_seconds > 0:
+            deadline = time.time() + wait_seconds
+            while time.time() < deadline and not self._stopped():
+                time.sleep(0.5)
+                if self._detect_and_solve_captcha(main_client):
+                    return True
+
+        # Если в DOM есть текст «не робот», но кликнуть не смогли — ждём вручную
+        try:
+            visible = main_client.is_captcha_dialog_visible()
+        except Exception:
+            visible = False
+        if visible:
+            try:
+                dbg = main_client.debug_captcha_state()
+                self._log(f"🤖 КАПЧА: диалог виден, но чекбокс не найден. DEBUG: {dbg}")
+            except Exception:
+                pass
+            self._log("🤖 КАПЧА: диалог виден, но недоступен через DOM — решите вручную (до 2 мин)")
+            deadline = time.time() + 120
+            while time.time() < deadline:
+                if self._stopped():
+                    return True
+                try:
+                    if not main_client.is_captcha_dialog_visible():
+                        self._log("  ✅ Капча решена, продолжаю")
+                        _human_pause(1.0, 2.0, self._stop_event)
+                        return True
+                except Exception:
+                    pass
+                # И пытаемся каждые 2 сек найти чекбокс автоматически
+                if self._detect_and_solve_captcha(main_client):
+                    return True
+                time.sleep(2)
+            self._log("  ⚠ Капча не решена за 2 минуты — останавливаю")
+            self._stop_event.set()
+            return True
+
+        return False
 
     # ── Навести курсор на строку (делает кнопку «...» видимой) ──────────────
 
@@ -654,7 +1154,13 @@ class VKBot:
             client.js_click_text("Назначить администратором", popup_only=False)
         except Exception:
             pass
-        _human_pause(1.0, 1.6, self._stop_event)
+
+        # VK может показать капчу «Я не робот» — ищем её до 12 сек.
+        # Начинаем СРАЗУ, без _human_pause, чтобы не упустить.
+        self._log("  🔎 жду появления капчи (до 12 сек)...")
+        self._handle_captcha(client, wait_seconds=12.0)
+        if self._stopped():
+            return False
         return True
 
     # ── Снять с должности ─────────────────────────────────────────────────────
@@ -698,23 +1204,17 @@ class VKBot:
                      or client.find_confirm_button("Убрать")
                      or client.find_confirm_button("Снять")
                      or client.find_confirm_button("Подтвердить")),
-            timeout=6,
+            timeout=4,
         )
-        if not btn:
-            self._log("  ⚠ Кнопка подтверждения снятия не найдена")
-            self._dump_menus(client)
-            if pyautogui:
-                pyautogui.press("escape")
-            return False
-
-        self._log("  → подтверждаю снятие")
-        self._click_rect(client, btn)
-        for txt in ("Разжаловать", "Убрать", "Снять", "Подтвердить"):
-            try:
-                if client.js_click_text(txt, popup_only=False):
-                    break
-            except Exception:
-                pass
+        if btn:
+            self._log("  → подтверждаю снятие")
+            self._click_rect(client, btn)
+            for txt in ("Разжаловать", "Убрать", "Снять", "Подтвердить"):
+                try:
+                    if client.js_click_text(txt, popup_only=False):
+                        break
+                except Exception:
+                    pass
         _human_pause(1.0, 1.6, self._stop_event)
         return True
 

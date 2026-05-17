@@ -7,6 +7,7 @@ Chrome должен быть запущен пользователем чере�
 """
 import json
 import logging
+import time
 from typing import Dict, List, Optional
 
 import requests
@@ -30,6 +31,9 @@ class CDPClient:
         self.ws = None
         self._id = 0
         self.target_url = ""
+        # Для доступа к OOPIF (cross-origin iframe) через auto-attach
+        self._iframe_sessions: Dict[str, Dict] = {}  # sessionId -> {url, targetId}
+        self._iframe_discovery_enabled = False
 
     # ─── Подключение ─────────────────────────────────────────────────────────
 
@@ -72,17 +76,130 @@ class CDPClient:
 
     # ─── Базовый вызов ───────────────────────────────────────────────────────
 
-    def _call(self, method: str, params: Optional[Dict] = None) -> Dict:
+    def _call(self, method: str, params: Optional[Dict] = None,
+              session_id: Optional[str] = None) -> Dict:
         self._id += 1
         msg = {"id": self._id, "method": method, "params": params or {}}
+        if session_id:
+            msg["sessionId"] = session_id
         self.ws.send(json.dumps(msg))
         while True:
             raw = self.ws.recv()
             data = json.loads(raw)
+            # Событие (нет id, есть method) — обрабатываем и продолжаем ждать
+            if "id" not in data and "method" in data:
+                self._handle_event(data)
+                continue
             if data.get("id") == self._id:
                 if "error" in data:
                     raise CDPError(f"{method}: {data['error']}")
                 return data.get("result", {})
+
+    def _handle_event(self, data: Dict) -> None:
+        """Обработать асинхронное событие CDP — в частности, прикрепление iframe-сессий."""
+        method = data.get("method")
+        params = data.get("params", {})
+        if method == "Target.attachedToTarget":
+            info = params.get("targetInfo", {})
+            sid = params.get("sessionId")
+            if sid and info.get("type") == "iframe":
+                self._iframe_sessions[sid] = {
+                    "url": info.get("url", ""),
+                    "targetId": info.get("targetId"),
+                }
+        elif method == "Target.detachedFromTarget":
+            sid = params.get("sessionId")
+            self._iframe_sessions.pop(sid, None)
+        elif method == "Target.targetInfoChanged":
+            info = params.get("targetInfo", {})
+            tid = info.get("targetId")
+            for s_info in self._iframe_sessions.values():
+                if s_info.get("targetId") == tid:
+                    s_info["url"] = info.get("url", s_info["url"])
+
+    def enable_iframe_discovery(self) -> None:
+        """Включить auto-attach: Chrome будет автоматически прикреплять
+        новые iframe-сессии к этому websocket. После этого можно
+        вызывать Runtime.evaluate с sessionId конкретного iframe.
+        """
+        if self._iframe_discovery_enabled:
+            return
+        try:
+            self._call("Target.setAutoAttach", {
+                "autoAttach": True,
+                "waitForDebuggerOnStart": False,
+                "flatten": True,
+            })
+            self._iframe_discovery_enabled = True
+        except Exception as e:
+            log.warning(f"setAutoAttach failed: {e}")
+
+    def pump_events(self, duration: float = 0.3) -> None:
+        """Прочитать ожидающие события (для сбора Target.attachedToTarget)."""
+        if not self.ws:
+            return
+        deadline = time.time() + duration
+        prev_timeout = self.ws.gettimeout()
+        try:
+            self.ws.settimeout(0.15)
+            while time.time() < deadline:
+                try:
+                    raw = self.ws.recv()
+                except Exception:
+                    break
+                try:
+                    data = json.loads(raw)
+                except Exception:
+                    continue
+                if "id" not in data and "method" in data:
+                    self._handle_event(data)
+        finally:
+            try:
+                self.ws.settimeout(prev_timeout)
+            except Exception:
+                pass
+
+    def get_iframe_sessions(self, url_filter: Optional[str] = None) -> Dict[str, Dict]:
+        """Текущие прикреплённые iframe-сессии (после pump_events)."""
+        self.pump_events(0.3)
+        if url_filter:
+            return {sid: info for sid, info in self._iframe_sessions.items()
+                    if url_filter in info.get("url", "")}
+        return dict(self._iframe_sessions)
+
+    def evaluate_in_session(self, expr: str, session_id: str):
+        """Выполнить JS в контексте конкретной iframe-сессии."""
+        try:
+            r = self._call("Runtime.evaluate", {
+                "expression": expr,
+                "returnByValue": True,
+                "awaitPromise": True,
+            }, session_id=session_id)
+        except Exception:
+            return None
+        if "exceptionDetails" in r:
+            return None
+        return r.get("result", {}).get("value")
+
+    def click_in_session(self, x: float, y: float, session_id: str) -> None:
+        """Клик в iframe-сессии (координаты iframe-relative CSS px)."""
+        for ev_type, btn, cnt in (
+            ("mouseMoved",    "none", 0),
+            ("mousePressed",  "left", 1),
+            ("mouseReleased", "left", 1),
+        ):
+            try:
+                self._call("Input.dispatchMouseEvent", {
+                    "type": ev_type,
+                    "x": float(x), "y": float(y),
+                    "button": btn,
+                    "buttons": 1 if ev_type == "mousePressed" else 0,
+                    "clickCount": cnt,
+                    "modifiers": 0,
+                    "pointerType": "mouse",
+                }, session_id=session_id)
+            except Exception:
+                pass
 
     def evaluate(self, expr: str):
         """Выполняет JS в текущей вкладке, возвращает значение."""
@@ -779,6 +896,269 @@ class CDPClient:
             return false;
         })(""" + json.dumps(member_id) + ")"
         return bool(self.evaluate(js))
+
+    def find_captcha_checkbox(self) -> Optional[dict]:
+        """Найти чекбокс 'Я не робот' (VK ID капча) в текущем фрейме.
+
+        Пробивает shadow DOM, same-origin iframes. Текст «Я не робот»
+        содержит &nbsp; — нормализуем все whitespace.
+        """
+        js = r"""
+        (function() {
+            // ── Утилиты ────────────────────────────────────────────────────
+            function norm(s) {
+                return (s || '').replace(/[\s ]+/g, ' ').trim().toLowerCase();
+            }
+            function rectOK(r) {
+                return r.width > 0 && r.height > 0
+                    && r.right > 0 && r.bottom > 0
+                    && r.left < (window.innerWidth + 50)
+                    && r.top < (window.innerHeight + 50);
+            }
+            function findCheckboxAncestor(el) {
+                let cur = el;
+                for (let i = 0; cur && i < 10; i++) {
+                    const cls = (typeof cur.className === 'string') ? cur.className : '';
+                    if (/Checkbox(?!.*title)/i.test(cls) && !/title/i.test(cls)) return cur;
+                    if (cur.tagName === 'LABEL') return cur;
+                    if (cur.getAttribute && cur.getAttribute('role') === 'checkbox') return cur;
+                    cur = cur.parentElement;
+                }
+                return null;
+            }
+            // Сбор всех корней: document + shadow roots + same-origin iframes
+            function collectRoots() {
+                const roots = [document];
+                const stack = [document];
+                while (stack.length) {
+                    const root = stack.pop();
+                    // Shadow roots
+                    const all = root.querySelectorAll ? root.querySelectorAll('*') : [];
+                    for (const el of all) {
+                        if (el.shadowRoot) {
+                            roots.push(el.shadowRoot);
+                            stack.push(el.shadowRoot);
+                        }
+                    }
+                    // Same-origin iframes
+                    const ifrs = root.querySelectorAll ? root.querySelectorAll('iframe') : [];
+                    for (const ifr of ifrs) {
+                        try {
+                            const d = ifr.contentDocument;
+                            if (d) {
+                                roots.push(d);
+                                stack.push(d);
+                            }
+                        } catch (e) {}
+                    }
+                }
+                return roots;
+            }
+
+            const roots = collectRoots();
+            const found = [];
+
+            for (const root of roots) {
+                // 1) По классу VKUI
+                try {
+                    for (const el of root.querySelectorAll(
+                        '[class*="Checkbox__title"], [class*="Checkbox-module__title"]'
+                    )) {
+                        const t = norm(el.textContent);
+                        if (!t.includes('не робот') && !t.includes('robot')) continue;
+                        const clickable = findCheckboxAncestor(el) || el.parentElement || el;
+                        const r = clickable.getBoundingClientRect();
+                        if (rectOK(r)) found.push({rect: r, src: 'vkc-title', txt: t});
+                    }
+                } catch (e) {}
+
+                // 2) input[type=checkbox]
+                try {
+                    for (const cb of root.querySelectorAll('input[type="checkbox"]')) {
+                        const wrap = cb.closest('label')
+                            || cb.closest('[class*="Checkbox"]')
+                            || cb.parentElement;
+                        if (!wrap) continue;
+                        const t = norm(wrap.textContent);
+                        if (!t.includes('не робот') && !t.includes('robot')) continue;
+                        const r = wrap.getBoundingClientRect();
+                        if (rectOK(r)) found.push({rect: r, src: 'input', txt: t});
+                    }
+                } catch (e) {}
+
+                // 3) Поиск по тексту
+                try {
+                    for (const el of root.querySelectorAll('div, span, p, label, button')) {
+                        if (el.children.length > 2) continue;
+                        const t = norm(el.textContent);
+                        if (t !== 'я не робот' && t !== "i'm not a robot"
+                            && t !== 'i am not a robot') continue;
+                        const clickable = findCheckboxAncestor(el) || el.parentElement || el;
+                        const r = clickable.getBoundingClientRect();
+                        if (rectOK(r)) found.push({rect: r, src: 'text', txt: t});
+                    }
+                } catch (e) {}
+
+                // 4) role="checkbox"
+                try {
+                    for (const el of root.querySelectorAll('[role="checkbox"]')) {
+                        const t = norm((el.getAttribute('aria-label') || '') + ' ' + el.textContent);
+                        if (!t.includes('не робот') && !t.includes('robot')) continue;
+                        const r = el.getBoundingClientRect();
+                        if (rectOK(r)) found.push({rect: r, src: 'role', txt: t});
+                    }
+                } catch (e) {}
+            }
+
+            if (!found.length) return null;
+            // Берём первый найденный
+            const f = found[0];
+            return {x: f.rect.left, y: f.rect.top, w: f.rect.width, h: f.rect.height,
+                    src: f.src, txt: f.txt};
+        })()
+        """
+        return self.evaluate(js)
+
+    def debug_captcha_state(self) -> dict:
+        """Диагностика: что есть в DOM по теме капчи."""
+        js = r"""
+        (function() {
+            const out = {
+                bodyHasText: false,
+                checkboxes: 0,
+                vkcCheckboxes: 0,
+                texts: [],
+                iframes: 0,
+                shadowRoots: 0,
+            };
+            const body = (document.body && document.body.innerText) || '';
+            out.bodyHasText = body.includes('не робот') || body.includes('Подтвердите');
+            out.checkboxes = document.querySelectorAll('input[type="checkbox"]').length;
+            out.vkcCheckboxes = document.querySelectorAll('[class*="Checkbox"]').length;
+            out.iframes = document.querySelectorAll('iframe').length;
+            for (const el of document.querySelectorAll('*')) {
+                if (el.shadowRoot) out.shadowRoots++;
+            }
+            for (const el of document.querySelectorAll('[class*="Checkbox__title"], [class*="Checkbox-module__title"]')) {
+                const t = (el.textContent || '').trim();
+                if (t && t.length < 60) out.texts.push(t);
+            }
+            return out;
+        })()
+        """
+        return self.evaluate(js) or {}
+
+    def is_captcha_dialog_visible(self) -> bool:
+        """Проверить, видна ли капча-диалог (в любом месте страницы)."""
+        js = r"""
+        (function() {
+            const body = document.body ? (document.body.innerText || '') : '';
+            return body.includes('не робот') || body.includes('Подтвердите');
+        })()
+        """
+        return bool(self.evaluate(js))
+
+    def get_popup_debugger_url(self, url_filter: str) -> Optional[str]:
+        """Найти popup-вкладку/окно по URL и вернуть адрес debugger websocket."""
+        try:
+            tabs = requests.get(f"http://localhost:{self.port}/json", timeout=3).json()
+            for t in tabs:
+                if t.get("type") == "page" and url_filter in t.get("url", ""):
+                    if t.get("url") != self.target_url:
+                        return t.get("webSocketDebuggerUrl")
+        except Exception:
+            pass
+        return None
+
+    def get_all_targets_cdp(self) -> list:
+        """Все CDP-таргеты, включая iframe (OOPIF) и popup-окна."""
+        try:
+            # Включаем auto-attach к iframe для появления их в Target list
+            try:
+                self._call("Target.setDiscoverTargets", {"discover": True})
+            except Exception:
+                pass
+            r = self._call("Target.getTargets", {})
+            return r.get("targetInfos", [])
+        except Exception:
+            return []
+
+    def iframe_ws_url(self, target_id: str) -> str:
+        return f"ws://localhost:{self.port}/devtools/page/{target_id}"
+
+    def find_captcha_iframe_in_parent(self) -> Optional[dict]:
+        """В контексте родителя ищет iframe который содержит VK ID капчу.
+
+        Возвращает rect iframe относительно viewport родителя и его src.
+        """
+        js = r"""
+        (function() {
+            const candidates = [];
+            for (const ifr of document.querySelectorAll('iframe')) {
+                const src = ifr.src || '';
+                const r = ifr.getBoundingClientRect();
+                if (r.width < 50 || r.height < 50) continue;
+                // VK ID / captcha признаки
+                const score = (
+                    (/id\.vk\.com/i.test(src) ? 10 : 0) +
+                    (/vkid/i.test(src) ? 8 : 0) +
+                    (/captcha/i.test(src) ? 8 : 0) +
+                    (/oauth/i.test(src) ? 4 : 0) +
+                    (/vk\.com/i.test(src) ? 2 : 0)
+                );
+                if (score > 0) {
+                    candidates.push({
+                        src: src,
+                        x: r.left, y: r.top, w: r.width, h: r.height,
+                        score: score
+                    });
+                }
+            }
+            if (!candidates.length) return null;
+            candidates.sort((a, b) => b.score - a.score);
+            return candidates[0];
+        })()
+        """
+        return self.evaluate(js)
+
+    def attach_existing_iframes(self) -> int:
+        """Вручную прикрепить уже существующие OOPIF-таргеты через attachToTarget.
+
+        setAutoAttach ловит только *новые* iframes; этот метод прикрепляет те,
+        что уже есть на странице. Возвращает число новых прикреплённых сессий.
+        """
+        attached = 0
+        try:
+            self._call("Target.setDiscoverTargets", {"discover": True})
+        except Exception:
+            pass
+        try:
+            r = self._call("Target.getTargets", {})
+        except Exception:
+            return 0
+        for t in r.get("targetInfos", []):
+            tid = t.get("targetId", "")
+            ttype = t.get("type", "")
+            url = t.get("url", "")
+            # Пропускаем основной target и уже прикреплённые
+            already = any(v.get("targetId") == tid for v in self._iframe_sessions.values())
+            if already:
+                continue
+            # Присоединяемся к iframe и page-типам с VK ID URL
+            is_vkid = "id.vk.com" in url or "captcha" in url or "vkid" in url
+            if ttype == "iframe" or (ttype == "page" and is_vkid):
+                try:
+                    res = self._call("Target.attachToTarget", {
+                        "targetId": tid,
+                        "flatten": True,
+                    })
+                    sid = res.get("sessionId")
+                    if sid:
+                        self._iframe_sessions[sid] = {"url": url, "targetId": tid}
+                        attached += 1
+                except Exception:
+                    pass
+        return attached
 
     def scroll_page(self, dy: int = 600) -> None:
         """Прокручивает страницу/контейнер вниз для подгрузки новых участников."""
