@@ -1175,19 +1175,52 @@ class CDPClient:
     def scroll_page(self, dy: int = 600) -> None:
         """Прокручивает список участников вниз.
 
-        Диспатчит WheelEvent прямо на контейнер со списком — работает
-        без фокуса окна и надёжно триггерит VK's scroll-handler.
+        Стратегия (комбо для максимальной надёжности):
+        1. scrollIntoView на последнюю строку — форсит lazy load в VK.
+        2. CDP Input.synthesizeScrollGesture — настоящий touch-скролл,
+           работает без фокуса окна, обходит anti-bot проверки.
+        3. WheelEvent + scrollTop как страховка.
         """
+        # 1. scrollIntoView — самый надёжный способ форсить подгрузку
+        try:
+            self.evaluate("""
+                (function() {
+                    const links = document.querySelectorAll('[data-testid="settings-subscriber-link"]');
+                    if (links.length > 0) {
+                        links[links.length - 1].scrollIntoView({block: 'end', behavior: 'instant'});
+                    }
+                })()
+            """)
+        except Exception:
+            pass
+
+        # 2. synthesizeScrollGesture — CDP-метод заточен под honest scroll
+        try:
+            vx = self.evaluate("window.innerWidth / 2") or 600
+            vy = self.evaluate("window.innerHeight / 2") or 400
+            self._call("Input.synthesizeScrollGesture", {
+                "x": float(vx),
+                "y": float(vy),
+                "xDistance": 0,
+                "yDistance": -float(dy),  # отрицательное = скролл вниз
+                "speed": 800,
+                "gestureSourceType": "mouse",
+                "repeatCount": 0,
+            })
+        except Exception:
+            pass
+
+        # 3. WheelEvent на найденный контейнер + scrollTop
         js = f"""
         (function(dy) {{
-            // Ищем контейнер через строку участника
             const link = document.querySelector('[data-testid="settings-subscriber-link"]');
             let target = document.scrollingElement || document.documentElement;
             if (link) {{
                 let el = link.parentElement;
-                for (let i = 0; i < 10 && el && el !== document.body; i++) {{
+                for (let i = 0; i < 12 && el && el !== document.body; i++) {{
                     const s = getComputedStyle(el);
-                    if (s.overflowY === 'auto' || s.overflowY === 'scroll') {{
+                    if ((s.overflowY === 'auto' || s.overflowY === 'scroll') &&
+                        el.scrollHeight > el.clientHeight + 50) {{
                         target = el; break;
                     }}
                     el = el.parentElement;
@@ -1197,8 +1230,11 @@ class CDPClient:
                 deltaY: dy, deltaMode: 0,
                 bubbles: true, cancelable: true, composed: true
             }}));
-            // Также двигаем scrollTop на случай если обработчик не подхватил
             target.scrollTop += dy;
+            window.scrollBy(0, dy);
         }})({int(dy)})
         """
-        self.evaluate(js)
+        try:
+            self.evaluate(js)
+        except Exception:
+            pass
