@@ -1173,17 +1173,32 @@ class CDPClient:
         return attached
 
     def scroll_page(self, dy: int = 600) -> None:
-        """Прокручивает список участников вниз через CDP mouseWheel."""
-        # Координата центра viewport — туда направляем колесо мыши
-        vx = self.evaluate("window.innerWidth / 2") or 600
-        vy = self.evaluate("window.innerHeight / 2") or 400
-        # Одно событие mouseWheel на весь dy (Chrome суммирует delta)
-        self._call("Input.dispatchMouseEvent", {
-            "type": "mouseWheel",
-            "x": float(vx),
-            "y": float(vy),
-            "deltaX": 0,
-            "deltaY": float(dy),
-            "modifiers": 0,
-            "pointerType": "mouse",
-        })
+        """Прокручивает список участников вниз.
+
+        Диспатчит WheelEvent прямо на контейнер со списком — работает
+        без фокуса окна и надёжно триггерит VK's scroll-handler.
+        """
+        js = f"""
+        (function(dy) {{
+            // Ищем контейнер через строку участника
+            const link = document.querySelector('[data-testid="settings-subscriber-link"]');
+            let target = document.scrollingElement || document.documentElement;
+            if (link) {{
+                let el = link.parentElement;
+                for (let i = 0; i < 10 && el && el !== document.body; i++) {{
+                    const s = getComputedStyle(el);
+                    if (s.overflowY === 'auto' || s.overflowY === 'scroll') {{
+                        target = el; break;
+                    }}
+                    el = el.parentElement;
+                }}
+            }}
+            target.dispatchEvent(new WheelEvent('wheel', {{
+                deltaY: dy, deltaMode: 0,
+                bubbles: true, cancelable: true, composed: true
+            }}));
+            // Также двигаем scrollTop на случай если обработчик не подхватил
+            target.scrollTop += dy;
+        }})({int(dy)})
+        """
+        self.evaluate(js)

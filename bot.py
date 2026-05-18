@@ -161,26 +161,7 @@ class VKBot:
     # ── Конвертация viewport CSS → физические OS-пиксели (с DPR) ─────────────
 
     def _scroll_list(self, client: cdp.CDPClient, dy: int = 600) -> None:
-        """Скроллит список участников вниз.
-
-        pyautogui.scroll — основной метод: CDP mouseWheel не триггерит
-        VK's IntersectionObserver, pyautogui создаёт настоящий OS-ивент.
-        CDP mouseWheel — fallback если pyautogui недоступен.
-        """
-        clicks = max(3, dy // 80)
-        if pyautogui:
-            try:
-                origin = client.get_content_origin()
-                dpr = float(origin.get("dpr", 1) or 1)
-                vx = client.evaluate("window.innerWidth / 2") or 600
-                vy = client.evaluate("window.innerHeight / 2") or 400
-                sx = int((origin["x"] + vx) * dpr)
-                sy = int((origin["y"] + vy) * dpr)
-                pyautogui.moveTo(sx, sy, duration=0.1, _pause=False)
-                pyautogui.scroll(-clicks, _pause=False)
-                return
-            except Exception:
-                pass
+        """Скроллит список участников вниз через JS WheelEvent."""
         try:
             client.scroll_page(dy)
         except Exception:
