@@ -30,16 +30,37 @@ def _flush() -> None:
         json.dump({"processed": _cache}, f, ensure_ascii=False, indent=2)
 
 
+def _aliases(account_id: str) -> list:
+    """Возвращает все варианты одного ID для проверки.
+
+    VK может показывать одного пользователя как 'id123' или как vanity-алиас.
+    Храним оба варианта чтобы не пропустить уже обработанного.
+    """
+    s = str(account_id)
+    variants = [s]
+    # id123456 → также проверяем '123456'
+    if s.startswith("id") and s[2:].isdigit():
+        variants.append(s[2:])
+    # 123456 → также проверяем 'id123456'
+    elif s.isdigit():
+        variants.append("id" + s)
+    return variants
+
+
 def is_processed(account_id: str) -> bool:
-    return str(account_id) in _load()
+    cache = _load()
+    return any(v in cache for v in _aliases(account_id))
 
 
 def mark_processed(account_id: str, group_url: str = "") -> None:
     cache = _load()
-    cache[str(account_id)] = {
+    entry = {
         "date":  datetime.now().isoformat(timespec="seconds"),
         "group": group_url,
     }
+    # Сохраняем под всеми вариантами ID
+    for v in _aliases(account_id):
+        cache[v] = entry
     _flush()
 
 

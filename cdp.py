@@ -223,13 +223,25 @@ class CDPClient:
             for (const a of document.querySelectorAll('[data-testid="settings-subscriber-link"]')) {
                 const href = a.href || '';
                 let uid;
-                // /id123456 или /123456 (оба варианта нормализуем к id123456)
-                const numMatch = href.match(/\/(?:id)?(\d{5,})(?:[/?#]|$)/);
+                // 1. Числовой ID из href (/id123 или /123) — любое кол-во цифр
+                const numMatch = href.match(/\/(?:id)?(\d+)(?:[/?#]|$)/);
                 if (numMatch) {
                     uid = 'id' + numMatch[1];
                 } else {
-                    const aliasMatch = href.match(/\/([a-zA-Z][a-zA-Z0-9_.]{1,})(?:[/?#]|$)/);
-                    if (aliasMatch) uid = aliasMatch[1];
+                    // 2. Vanity URL — ищем числовой ID в data-атрибутах родителей
+                    let numericId = null;
+                    let el = a.parentElement;
+                    for (let i = 0; i < 8 && el; i++, el = el.parentElement) {
+                        const v = el.dataset.id || el.dataset.userId ||
+                                  el.dataset.peerId || el.dataset.ownerId;
+                        if (v && /^\d+$/.test(v)) { numericId = v; break; }
+                    }
+                    if (numericId) {
+                        uid = 'id' + numericId;
+                    } else {
+                        const aliasMatch = href.match(/\/([a-zA-Z][a-zA-Z0-9_.]{1,})(?:[/?#]|$)/);
+                        if (aliasMatch) uid = aliasMatch[1];
+                    }
                 }
                 if (!uid) continue;
                 if (seen.has(uid)) continue;
