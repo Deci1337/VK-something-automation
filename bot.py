@@ -401,21 +401,20 @@ class VKBot:
                     storage.mark_processed(uid, self.group_url)
                     break
 
-                # 5. Ждём (с фоновой проверкой капчи каждые 1.5 сек)
-                hold = random.uniform(self.admin_hold, self.admin_hold + 5)
-                self._log(f"  ⏱ Держим {hold:.0f} сек (с мониторингом капчи)...")
-                self._wait_idle(hold, captcha_client=client)
+                # 5-7. Hold + remove + mark — гарантируем mark_processed даже при ошибке
+                try:
+                    hold = random.uniform(self.admin_hold, self.admin_hold + 5)
+                    self._log(f"  ⏱ Держим {hold:.0f} сек (с мониторингом капчи)...")
+                    self._wait_idle(hold, captcha_client=client)
 
-                if self._stopped():
+                    if self._stopped():
+                        break
+
+                    if not self._remove_admin(client, uid):
+                        self._log(f"  ⚠ Не удалось снять {uid} с должности")
+                finally:
                     storage.mark_processed(uid, self.group_url)
-                    break
 
-                # 6. Снимаем с должности
-                if not self._remove_admin(client, uid):
-                    self._log(f"  ⚠ Не удалось снять {uid} с должности")
-
-                # 7. Фиксируем
-                storage.mark_processed(uid, self.group_url)
                 done += 1
                 self._progress(done, self.count)
                 self._log(f"  ✅ {uid} готово ({done}{'/' + str(self.count) if self.count else ''})")
