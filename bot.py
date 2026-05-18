@@ -326,6 +326,21 @@ class VKBot:
                 self._log(f"  {s}...")
                 time.sleep(1)
 
+            # Закрываем любые открытые диалоги/меню от предыдущей сессии
+            self._log("  🧹 Закрываю незакрытые диалоги от предыдущей сессии...")
+            for _ in range(5):
+                if pyautogui:
+                    try: pyautogui.press("escape")
+                    except Exception: pass
+                try:
+                    client.evaluate(
+                        "document.dispatchEvent(new KeyboardEvent('keydown',"
+                        "{key:'Escape',keyCode:27,bubbles:true}))"
+                    )
+                except Exception:
+                    pass
+                time.sleep(0.3)
+
             done             = 0
             unlimited        = self.count == 0
             empty_scrolls    = 0
