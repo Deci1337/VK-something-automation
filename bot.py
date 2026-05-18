@@ -163,10 +163,24 @@ class VKBot:
     def _scroll_list(self, client: cdp.CDPClient, dy: int = 600) -> None:
         """Скроллит список участников вниз.
 
-        Стратегия:
-        1. JS scrollTop по контейнеру со строкой участника (быстро, тихо).
-        2. CDP mouseWheel как fallback.
+        pyautogui.scroll — основной метод: CDP mouseWheel не триггерит
+        VK's IntersectionObserver, pyautogui создаёт настоящий OS-ивент.
+        CDP mouseWheel — fallback если pyautogui недоступен.
         """
+        clicks = max(3, dy // 80)
+        if pyautogui:
+            try:
+                origin = client.get_content_origin()
+                dpr = float(origin.get("dpr", 1) or 1)
+                vx = client.evaluate("window.innerWidth / 2") or 600
+                vy = client.evaluate("window.innerHeight / 2") or 400
+                sx = int((origin["x"] + vx) * dpr)
+                sy = int((origin["y"] + vy) * dpr)
+                pyautogui.moveTo(sx, sy, duration=0.1, _pause=False)
+                pyautogui.scroll(-clicks, _pause=False)
+                return
+            except Exception:
+                pass
         try:
             client.scroll_page(dy)
         except Exception:
@@ -440,6 +454,18 @@ class VKBot:
                         time.sleep(1)
                     if self._stopped():
                         break
+                    # Ждём пока страница загрузится (появятся строки участников)
+                    self._log("  ⏳ Жду загрузки страницы...")
+                    for _ in range(30):
+                        if self._stopped():
+                            break
+                        try:
+                            members_check = client.get_members()
+                            if members_check:
+                                break
+                        except Exception:
+                            pass
+                        time.sleep(2)
                     self._log("  ▶ Продолжаю — прокручиваю до необработанных участников...")
                     empty_scrolls = 0
                     MAX_EMPTY = max(MAX_EMPTY, 60)
