@@ -551,15 +551,20 @@ class CDPClient:
             const candidates = [];
             for (const el of allClickable) {
                 if (el === memberLink || memberLink.contains(el)) continue;
+                // Пропускаем position:fixed элементы (VK chat-widget, уведомления и т.п.)
+                let cur = el;
+                let isFixed = false;
+                for (let i = 0; cur && i < 8; i++) {
+                    if (getComputedStyle(cur).position === 'fixed') { isFixed = true; break; }
+                    cur = cur.parentElement;
+                }
+                if (isFixed) continue;
                 const r = el.getBoundingClientRect();
                 let rect = r;
                 let hidden = false;
                 if (r.width === 0 || r.height === 0) {
-                    // Скрытая кнопка (hover-only). Проверим, что её аria-label
-                    // намекает на меню — иначе пропускаем.
                     const al = (el.getAttribute('aria-label') || '').toLowerCase();
                     if (!/ещё|more|действ|меню|menu/.test(al)) continue;
-                    // Используем позицию родителя
                     const p = el.parentElement;
                     if (!p) continue;
                     rect = p.getBoundingClientRect();
@@ -567,9 +572,7 @@ class CDPClient:
                     hidden = true;
                 }
                 const midY = rect.top + rect.height / 2;
-                // Должен быть на той же строке
                 if (Math.abs(midY - linkMidY) > rowH * 0.7) continue;
-                // Должен быть правее ссылки участника (или внутри её правой половины)
                 if (rect.right < linkRight - 10) continue;
                 candidates.push({el, rect, hidden,
                     al: (el.getAttribute('aria-label') || '').toLowerCase()});
@@ -617,6 +620,12 @@ class CDPClient:
                 'button, [role="button"], [aria-haspopup], [aria-label]'
             )) {
                 if (el === link || link.contains(el)) continue;
+                let cur2 = el; let isFixed2 = false;
+                for (let i = 0; cur2 && i < 8; i++) {
+                    if (getComputedStyle(cur2).position === 'fixed') { isFixed2 = true; break; }
+                    cur2 = cur2.parentElement;
+                }
+                if (isFixed2) continue;
                 const r = el.getBoundingClientRect();
                 let rect = r;
                 if (r.width === 0 || r.height === 0) {
