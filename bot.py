@@ -1240,32 +1240,50 @@ class VKBot:
             if pyautogui:
                 pyautogui.press("escape")
             return False
-        self._log("  → подтверждаю «Назначить администратором»")
-        self._click_rect(client, confirm)
-        try:
-            client.js_click_text("Назначить администратором", popup_only=False)
-        except Exception:
-            pass
-
-        # Даём VK 1.5 сек ответить — ошибка появляется раньше капчи
-        time.sleep(1.5)
-        err = client.find_vk_error()
-        if err:
-            self._log(f"  ⏭ VK вернул ошибку: «{err}» — пропускаю")
+        # Финальный клик — до 2 попыток с паузой 3 сек.
+        # Если диалог не исчез после 2-х нажатий → скипаем и закрываем.
+        confirmed = False
+        for attempt in range(1, 3):
+            self._log(f"  → подтверждаю «Назначить администратором» (попытка {attempt}/2)")
+            self._click_rect(client, confirm)
             try:
-                client.evaluate(
-                    "document.dispatchEvent(new KeyboardEvent('keydown',"
-                    "{key:'Escape',keyCode:27,bubbles:true}))"
-                )
+                client.js_click_text("Назначить администратором", popup_only=False)
             except Exception:
                 pass
+
+            time.sleep(3.0)
+
+            # Проверяем ошибку VK
+            err = client.find_vk_error()
+            if err:
+                self._log(f"  ⏭ VK вернул ошибку: «{err}» — пропускаю")
+                client.close_modal()
+                if pyautogui:
+                    try: pyautogui.press("escape")
+                    except Exception: pass
+                return False
+
+            # Диалог закрылся? (кнопка «Назначить администратором» пропала)
+            still_open = client.find_confirm_button("Назначить администратором")
+            if not still_open:
+                confirmed = True
+                break
+
+            self._log(f"  ↻ диалог ещё открыт после попытки {attempt}")
+            # Обновляем rect кнопки на случай если диалог пересчитал позицию
+            fresh = client.find_confirm_button("Назначить администратором")
+            if fresh:
+                confirm = fresh
+
+        if not confirmed:
+            self._log("  ⏭ Диалог не закрылся после 2 нажатий — пропускаю")
+            client.close_modal()
             if pyautogui:
                 try: pyautogui.press("escape")
                 except Exception: pass
             return False
 
         # VK может показать капчу «Я не робот» — ищем её до 12 сек.
-        # Начинаем СРАЗУ, без _human_pause, чтобы не упустить.
         self._log("  🔎 жду появления капчи (до 12 сек)...")
         self._handle_captcha(client, wait_seconds=12.0)
         if self._stopped():

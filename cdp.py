@@ -934,6 +934,46 @@ class CDPClient:
         result = self.evaluate(js)
         return result if isinstance(result, str) else None
 
+    def close_modal(self) -> None:
+        """Закрыть открытый модальный диалог: сначала кнопка-крестик, затем Escape."""
+        # Ищем крестик (×) в открытых модальных диалогах
+        js = r"""
+        (function() {
+            const closeSelectors = [
+                '[aria-label="Закрыть"]', '[aria-label="Close"]',
+                '[data-testid="modal-close"]',
+                '[class*="ModalDismissButton"]', '[class*="modalClose"]',
+                '[class*="Modal__close"]', '[class*="Modal-close"]',
+            ];
+            for (const sel of closeSelectors) {
+                for (const el of document.querySelectorAll(sel)) {
+                    const r = el.getBoundingClientRect();
+                    if (r.width > 0 && r.height > 0) { el.click(); return true; }
+                }
+            }
+            // Fallback: кнопка внутри диалога с × или SVG-крестиком без текста
+            for (const el of document.querySelectorAll('[role="dialog"] button, [class*="Modal"] button')) {
+                const t = (el.textContent || '').trim();
+                if (t === '×' || t === '✕' || t === '' ) {
+                    const r = el.getBoundingClientRect();
+                    if (r.width > 0 && r.height > 0) { el.click(); return true; }
+                }
+            }
+            return false;
+        })()
+        """
+        try:
+            self.evaluate(js)
+        except Exception:
+            pass
+        try:
+            self.evaluate(
+                "document.dispatchEvent(new KeyboardEvent('keydown',"
+                "{key:'Escape',keyCode:27,bubbles:true}))"
+            )
+        except Exception:
+            pass
+
     def find_confirm_button(self, text: str) -> Optional[dict]:
         """Viewport-rect видимой кнопки подтверждения с заданным текстом."""
         js = r"""
