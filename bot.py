@@ -1136,6 +1136,19 @@ class VKBot:
                     pass
                 return item
 
+            # Меню открылось, но нужного пункта нет?
+            # Это признак удалённого/забаненного аккаунта — не тратим время на retry.
+            popups = client.dump_popups()
+            if popups:
+                self._log(
+                    f"  ⚠ Меню открыто, но «{probe_text}» отсутствует "
+                    f"(аккаунт удалён/забанен или уже имеет роль)"
+                )
+                if pyautogui:
+                    try: pyautogui.press("escape")
+                    except Exception: pass
+                return False  # сигнал: меню открылось, но опции нет
+
             # Меню не открылось — закрываем и пробуем заново
             if pyautogui:
                 try: pyautogui.press("escape")
@@ -1151,6 +1164,9 @@ class VKBot:
     def _make_admin(self, client: cdp.CDPClient, uid: str) -> bool:
         # 1. Открываем меню и получаем rect «Назначить руководителем»
         item = self._open_action_menu(client, uid, "Назначить руководителем")
+        if item is False:
+            # Меню открылось, но опции нет → удалён/забанен/уже назначен
+            return False
         if not item:
             return False
         if self._stopped():
