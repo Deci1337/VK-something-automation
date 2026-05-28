@@ -574,6 +574,8 @@ class CDPClient:
                 const midY = rect.top + rect.height / 2;
                 if (Math.abs(midY - linkMidY) > rowH * 0.7) continue;
                 if (rect.right < linkRight - 10) continue;
+                // Не дальше 600px правее ссылки — исключает виджеты у края экрана
+                if (rect.left > linkRight + 600) continue;
                 candidates.push({el, rect, hidden,
                     al: (el.getAttribute('aria-label') || '').toLowerCase()});
             }
@@ -639,6 +641,7 @@ class CDPClient:
                 const midY = rect.top + rect.height / 2;
                 if (Math.abs(midY - linkMidY) > rowH * 0.7) continue;
                 if (rect.right < lr.right - 10) continue;
+                if (rect.left > lr.right + 600) continue;
                 candidates.push({el, rect,
                     al: (el.getAttribute('aria-label') || '').toLowerCase()});
             }
