@@ -390,11 +390,23 @@ class VKBot:
                 uid = target["id"]
                 self._log(f"\n👤 Обрабатываю: {uid}")
 
-                # 3. Скроллим участника в центр экрана
+                # 3. Скроллим участника в центр экрана + проверяем что он ещё в группе
                 try:
-                    client.scroll_member_into_view(uid)
+                    in_dom = client.scroll_member_into_view(uid)
                 except Exception:
-                    pass
+                    in_dom = True  # неизвестно — пробуем дальше
+
+                if not in_dom:
+                    # Элемент пропал из DOM: пользователь покинул группу после загрузки
+                    # Делаем повторный get_members чтобы убедиться (не виртуальный скролл)
+                    fresh = [m["id"] for m in client.get_members()]
+                    aliases = [uid] + ([uid[2:]] if uid.startswith("id") else ["id" + uid])
+                    if not any(a in fresh for a in aliases):
+                        self._log(f"  ⏭ {uid} — покинул группу, пропускаю")
+                        storage.mark_processed(uid, self.group_url)
+                        continue
+                    # Иначе просто не прокрутился — продолжаем
+
                 _human_pause(0.5, 1.0, self._stop_event)
                 if self._stopped():
                     break
