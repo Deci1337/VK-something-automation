@@ -47,12 +47,22 @@ def _aliases(account_id: str) -> list:
     return variants
 
 
+def _cache_key(account_id: str, group_url: str) -> str:
+    """Составной ключ id::group — позволяет хранить разные группы независимо."""
+    if group_url:
+        return f"{account_id}::{group_url}"
+    return account_id
+
+
 def is_processed(account_id: str, group_url: str = "") -> bool:
     cache = _load()
     for v in _aliases(account_id):
-        if v in cache:
-            if not group_url or cache[v].get("group", "") == group_url:
-                return True
+        key = _cache_key(v, group_url)
+        if key in cache:
+            return True
+        # Обратная совместимость: старые записи без суффикса группы
+        if not group_url and v in cache:
+            return True
     return False
 
 
@@ -62,9 +72,8 @@ def mark_processed(account_id: str, group_url: str = "") -> None:
         "date":  datetime.now().isoformat(timespec="seconds"),
         "group": group_url,
     }
-    # Сохраняем под всеми вариантами ID
     for v in _aliases(account_id):
-        cache[v] = entry
+        cache[_cache_key(v, group_url)] = entry
     _flush()
 
 

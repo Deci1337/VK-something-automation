@@ -256,8 +256,10 @@ class CDPClient:
                 const deactivated = rowCls.includes('deactivated')
                     || rowHTML.includes('--deactivated')
                     || rowText.includes('удалённый пользователь')
+                    || rowText.includes('удалённая страница')
                     || rowText.includes('страница удалена')
-                    || rowText.includes('заблокированный пользователь');
+                    || rowText.includes('заблокированный пользователь')
+                    || rowText.includes('заблокированная страница');
                 out.push({id: uid, href: href, top: r.top, height: r.height, deactivated: deactivated});
             }
             return out;
