@@ -899,6 +899,41 @@ class CDPClient:
         result = self.evaluate(js)
         return result if isinstance(result, list) else []
 
+    def find_vk_error(self) -> Optional[str]:
+        """Найти видимое сообщение об ошибке VK (тост, снекбар, диалог).
+
+        Возвращает текст ошибки или None если ошибок нет.
+        """
+        js = r"""
+        (function() {
+            const errorPhrases = [
+                'невозможно', 'не удалось', 'ошибка', 'не может быть',
+                'нельзя', 'заблокирован', 'удалён', 'недоступн'
+            ];
+            const selectors = [
+                '[class*="Snackbar"]', '[class*="snackbar"]',
+                '[role="alert"]',
+                '[class*="Toast"]', '[class*="toast"]',
+                '[class*="Error"]', '[class*="error"]',
+                '[class*="Alert"]', '[class*="Notification"]',
+            ];
+            for (const sel of selectors) {
+                for (const el of document.querySelectorAll(sel)) {
+                    const r = el.getBoundingClientRect();
+                    if (r.width < 10 || r.height < 10) continue;
+                    const t = (el.textContent || '').trim().toLowerCase();
+                    if (!t) continue;
+                    if (errorPhrases.some(p => t.includes(p))) {
+                        return (el.textContent || '').trim().slice(0, 120);
+                    }
+                }
+            }
+            return null;
+        })()
+        """
+        result = self.evaluate(js)
+        return result if isinstance(result, str) else None
+
     def find_confirm_button(self, text: str) -> Optional[dict]:
         """Viewport-rect видимой кнопки подтверждения с заданным текстом."""
         js = r"""

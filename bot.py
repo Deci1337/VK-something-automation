@@ -1247,6 +1247,23 @@ class VKBot:
         except Exception:
             pass
 
+        # Даём VK 1.5 сек ответить — ошибка появляется раньше капчи
+        time.sleep(1.5)
+        err = client.find_vk_error()
+        if err:
+            self._log(f"  ⏭ VK вернул ошибку: «{err}» — пропускаю")
+            try:
+                client.evaluate(
+                    "document.dispatchEvent(new KeyboardEvent('keydown',"
+                    "{key:'Escape',keyCode:27,bubbles:true}))"
+                )
+            except Exception:
+                pass
+            if pyautogui:
+                try: pyautogui.press("escape")
+                except Exception: pass
+            return False
+
         # VK может показать капчу «Я не робот» — ищем её до 12 сек.
         # Начинаем СРАЗУ, без _human_pause, чтобы не упустить.
         self._log("  🔎 жду появления капчи (до 12 сек)...")
