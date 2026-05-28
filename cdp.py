@@ -248,7 +248,17 @@ class CDPClient:
                 seen.add(uid);
                 const row = a.closest('li') || a.closest('[class*="Cell"]') || a.parentElement;
                 const r = (row || a).getBoundingClientRect();
-                out.push({id: uid, href: href, top: r.top, height: r.height});
+                // Detect banned/deleted/deactivated accounts
+                const rowEl = row || a;
+                const rowText = (rowEl.textContent || '').toLowerCase();
+                const rowCls = (typeof rowEl.className === 'string' ? rowEl.className : '').toLowerCase();
+                const rowHTML = (rowEl.innerHTML || '').toLowerCase();
+                const deactivated = rowCls.includes('deactivated')
+                    || rowHTML.includes('--deactivated')
+                    || rowText.includes('удалённый пользователь')
+                    || rowText.includes('страница удалена')
+                    || rowText.includes('заблокированный пользователь');
+                out.push({id: uid, href: href, top: r.top, height: r.height, deactivated: deactivated});
             }
             return out;
         })()

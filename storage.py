@@ -47,9 +47,13 @@ def _aliases(account_id: str) -> list:
     return variants
 
 
-def is_processed(account_id: str) -> bool:
+def is_processed(account_id: str, group_url: str = "") -> bool:
     cache = _load()
-    return any(v in cache for v in _aliases(account_id))
+    for v in _aliases(account_id):
+        if v in cache:
+            if not group_url or cache[v].get("group", "") == group_url:
+                return True
+    return False
 
 
 def mark_processed(account_id: str, group_url: str = "") -> None:

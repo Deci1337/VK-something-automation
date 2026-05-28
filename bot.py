@@ -359,7 +359,13 @@ class VKBot:
                 target = None
                 skipped_in_view = 0
                 for m in members:
-                    if storage.is_processed(m["id"]) or storage.is_ignored(m["id"]):
+                    if m.get("deactivated"):
+                        if not storage.is_processed(m["id"], self.group_url):
+                            self._log(f"  ⏭ {m['id']} — удалённый/забаненный аккаунт, пропускаю")
+                            storage.mark_processed(m["id"], self.group_url)
+                        skipped_in_view += 1
+                        continue
+                    if storage.is_processed(m["id"], self.group_url) or storage.is_ignored(m["id"]):
                         skipped_in_view += 1
                         continue
                     target = m
